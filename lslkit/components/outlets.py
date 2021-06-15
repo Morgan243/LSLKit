@@ -7,31 +7,7 @@ import os
 from scipy.io import loadmat
 from tqdm.auto import tqdm
 import threading
-import time
 
-
-#class Counter():
-#    def __init__(self, increment):
-#        self.next_t = time.time()
-#        self.i = 0
-#        self.done = False
-#        self.increment = increment
-#        self._run()
-#
-#    def _run(self):
-#        print("hello ", self.i)
-#        self.next_t += self.increment
-#        self.i += 1
-#        if not self.done:
-#            threading.Timer(self.next_t - time.time(), self._run).start()
-#
-#    def stop(self):
-#        self.done = True
-#
-#
-#a = Counter(increment=1)
-#time.sleep(5)
-#a.stop()
 
 @attr.s
 class PeriodicCallback:
@@ -154,7 +130,6 @@ class BaseOutlet:
 class FileReplayOutlet(BaseOutlet):
     file_path = attr.ib(None)
     data_key = attr.ib(None)
-    #outlet_chunksize = attr.ib(32)
     outlet_chunksize = attr.ib(32)
 
     on_end = attr.ib('restart')
@@ -182,7 +157,7 @@ class FileReplayOutlet(BaseOutlet):
         if '.csv' in fname.lower():
             df = pd.read_csv(p)
         elif '.mat' in fname.lower():
-            mat_data = loadmat(p)
+            mat_data = loadmat(p, variable_names=[key])
             df = pd.DataFrame(mat_data[key])
         elif '.hdf' in fname.lower():
             df = pd.read_hdf(p, key)
@@ -198,6 +173,7 @@ class FileReplayOutlet(BaseOutlet):
             elif self.on_end == 'restart':
                 print("Restarting")
                 self.n_samples = 0
+                self.sent_samples = 0
                 self._pbar.close()
                 self.init_pbar()
 
@@ -205,35 +181,4 @@ class FileReplayOutlet(BaseOutlet):
         self.sent_samples += n
         self._pbar.update(n)
         return s
-
-
-
-
-#    def run(self):
-#        print("now sending data...")
-#        start_time = pylsl.local_clock()
-#        sent_samples = 0
-#        #
-#        sleep_time = self.sample_delta_t * 0.5
-#        print("Start time: " + str(start_time))
-#        while True:
-#            elapsed_time = pylsl.local_clock() - start_time
-#            required_samples = int(self.srate * elapsed_time) - sent_samples
-#            if required_samples > 0:
-#                print("Sending required samples: " + str(required_samples))
-#                # make a chunk==array of length required_samples, where each element in the array
-#                # is a new random n_channels sample vector
-#                #mychunk = [[rand() for chan_ix in range(self.n_channels)]
-#                #           for samp_ix in range(required_samples)]
-#                mychunk = self.arr[sent_samples: sent_samples + required_samples].tolist()
-#                #mychunk.tolist()
-#                # get a time stamp in seconds (we pretend that our samples are actually
-#                # 125ms old, e.g., as if coming from some external hardware)
-#                stamp = pylsl.local_clock() - self.buffer_time
-#                # now send it and wait for a bit
-#                # Note that even though `rand()` returns a 64-bit value, the `push_chunk` method
-#                #  will convert it to c_float before passing the data to liblsl.
-#                self.lsl_outlet.push_chunk(mychunk, stamp)
-#                sent_samples += required_samples
-#            time.sleep(sleep_time)
 
