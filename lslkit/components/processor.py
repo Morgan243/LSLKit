@@ -15,6 +15,7 @@ class ProcessStream:
     #stream_type = attr.ib('EMG')
 
     done = attr.ib(False, init=False)
+    _pbar = attr.ib(None, init=False)
     #resolve_timeout = 10
     dtypes = [[], np.float32, np.float64, None, np.int32, np.int16, np.int8, np.int64]
 
@@ -64,6 +65,7 @@ class ProcessStream:
         #print(f"-----Selected stream ----\n{print((s.as_xml()))}\n---------")
         return cls(stream_info=s, process_f=process_f, preprocessor=preprocessor, chunksize=chunksize)
 
+
     def increment(self):
         _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=self.buffer.shape[0], dest_obj=self.buffer)
         #chunk_arr = np.array(chunk)
@@ -74,9 +76,37 @@ class ProcessStream:
             chunk_df = None
         return chunk_df
 
-    def begin(self):
+    def increment_until(self, chunk_size):
+        buffer = np.empty((chunk_size, self.stream_info.channel_count()), dtype=self.buffer.dtype)
+        _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=buffer.shape[0], dest_obj=buffer)
+        while len(timestamps) < chunk_size:
+            remaining = chunk_size - len(timestamps)
+            _, new_timestamps = self.inlet.pull_chunk(timeout=0, max_samples=remaining, dest_obj=buffer[:remaining])
+            timestamps += new_timestamps
+
+        ts = pd.Series(map(pd.Timestamp.fromtimestamp, timestamps))
+        chunk_df = pd.DataFrame(buffer, index=ts - self.stream_creation_timesamp)
+        return chunk_df
+
+    def increment_and_process(self, required_size=None):
+        chunk_df = self.increment() if required_size is None else self.increment_until(required_size)
+        if chunk_df is not None:
+            r = self.process_f(chunk_df)
+            self._pbar.update(n=chunk_df.shape[0])
+        else:
+            r = None
+        return chunk_df, r
+
+    def begin(self, required_size=None):
         while not self.done:
-            chunk_df = self.increment()
-            if chunk_df is not None:
-                self.process_f(chunk_df)
-                self._pbar.update(n=chunk_df.shape[0])
+            in_data, proc_out = self.increment_and_process(required_size=required_size)
+            if self._pbar is not None:
+                self._pbar.update(in_data.shape[0])
+                self._pbar.set_description(f"{self.inlet.samples_available()} samples available")
+
+    def apply(self, other_as_in):
+        def new_proc_func(_x):
+            __x = self.process_f(_x)
+            return other_as_in(__x)
+        self.process_f = new_proc_func
+        return self
