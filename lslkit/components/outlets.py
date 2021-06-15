@@ -17,23 +17,37 @@ class PeriodicCallback:
     kwargs = attr.ib(attr.Factory(lambda: dict()))
     done = attr.ib(False, init=False)
 
-    #start_time = attr.ib(0, init=False)
-    next_time = attr.ib(None, init=False)
     add_error = attr.ib(0, init=False)
+
+    _start_t = attr.ib(None, init=False)
+    _next_t = attr.ib(None, init=False)
+    last_error = attr.ib(0, init=False)
+    sum_error = attr.ib(0, init=False)
+
 
     def _period(self):
         t = pylsl.local_clock()
-#        if self.next_time is not None:
-#            # If we are late, it's negative
-#            error = 0#(self.next_time - t)
-#            #print(error)
-#        else:
-#            error = 0
-        #self.start_time = t
-        self.next_time = t + self.delta_t_sec
-        self.callback(*self.args, **self.kwargs)
+
+        if self._next_t is not None:
+            this_error = self._next_t - t
+            # This one works well - first iteration
+            error = (this_error) * 0.25 + (self.last_error * 0.25) + (self.sum_error * .75)
+
+            #error = (self._next_t - t) * 0. + (self.last_error * 0.25) + (self.sum_error * .75)
+            #error = (self._next_t - t) * 1.0 + (self.last_error * 0.) + (self.sum_error * .75)
+            #error = this_error * 1.0 + ((this_error - self.last_error) * .5) + (self.sum_error * .75)
+            #error = this_error * .25 + ((this_error - self.last_error) * .25) + (self.sum_error * .75)
+        else:
+            error = 0
+
+        self.last_error = error
+        self.sum_error = (self.sum_error / 2. + error / 2.)
+        self._next_t = t + self.delta_t_sec
+
+        r = self.callback(*self.args, **self.kwargs)
         if not self.done:
-            threading.Timer(self.next_time - pylsl.local_clock() + self.add_error, self._period).start()
+            threading.Timer(self._next_t - pylsl.local_clock() + self.add_error + error, self._period).start()
+        return r
 
     def set_additional_error(self, error):
         self.add_error = error
@@ -66,10 +80,9 @@ class BaseOutlet:
 
     p_callback = attr.ib(None, init=False)
     _pbar = attr.ib(None, init=False)
-    _start_t = attr.ib(None, init=False)
-    _next_t = attr.ib(None, init=False)
-    last_error = attr.ib(0, init=False)
-    sum_error = attr.ib(0, init=False)
+    outlet_info = attr.ib(None, init=False)
+    lsl_outlet = attr.ib(None, init=False)
+
 
     def __attrs_post_init__(self):
         self.sample_delta_t = 1. / self.srate
@@ -91,28 +104,11 @@ class BaseOutlet:
         raise NotImplementedError()
 
     def push_to_lsl(self):
-        t = pylsl.local_clock()
-        if self._next_t is not None:
-            this_error = self._next_t - t
-            # This one works well - first iteration
-            error = (this_error) * 0.25 + (self.last_error * 0.25) + (self.sum_error * .75)
-
-            #error = (self._next_t - t) * 0. + (self.last_error * 0.25) + (self.sum_error * .75)
-            #error = (self._next_t - t) * 1.0 + (self.last_error * 0.) + (self.sum_error * .75)
-            #error = this_error * 1.0 + ((this_error - self.last_error) * .5) + (self.sum_error * .75)
-            #error = this_error * .25 + ((this_error - self.last_error) * .25) + (self.sum_error * .75)
-        else:
-            error = 0
-
-        self.last_error = error
-        self.sum_error = (self.sum_error / 2. + error / 2.)
-        self._next_t = t + self.sample_delta_t
         out = self.increment(self.outlet_chunksize)
-        stamp = t - self.buffer_time
+        stamp = pylsl.local_clock() - self.buffer_time
         if isinstance(out, np.ndarray):
             out = out.tolist()
         self.lsl_outlet.push_chunk(out, stamp)
-        self.p_callback.set_additional_error(error)
 
     def begin(self):
         assert self.p_callback is None, 'Callback handler already exists'
@@ -146,10 +142,6 @@ class FileReplayOutlet(BaseOutlet):
         self.n_channels = self.df.shape[-1]
         self.n_samples = self.df.shape[0]
         super().__attrs_post_init__()
-        #self.sample_delta_t = 1. / self.srate
-        #if self.pbar:
-        #    self.init_pbar()
-        #self.init_lsl()
 
     @classmethod
     def load_file_to_frame(cls, p, key=None):
