@@ -8,7 +8,7 @@ import pandas as pd
 class ProcessStream:
     stream_info = attr.ib()
     process_f = attr.ib()
-    chunksize: int = attr.ib()
+    max_buflen: int = attr.ib()
     preprocessor = attr.ib(None)
     pbar = attr.ib(True)
     #max_buf = attr.ib(None)
@@ -23,7 +23,7 @@ class ProcessStream:
         import pylsl
         #self.streams = resolve_byprop('type', 'EMG', timeout=10)
         #self.streams = self.find_streams(self.stream_type, self.resolve_timeout)
-        self.buffer = np.empty((self.chunksize, self.stream_info.channel_count()),
+        self.buffer = np.empty((self.max_buflen, self.stream_info.channel_count()),
                                dtype=self.dtypes[self.stream_info.channel_format()])
 
         self.stream_creation_t = self.stream_info.created_at()
@@ -35,7 +35,7 @@ class ProcessStream:
         self.init_lsl()
 
     def init_lsl(self):
-        self.inlet = StreamInlet(self.stream_info, max_buflen=self.chunksize, processing_flags=pylsl.proc_ALL)
+        self.inlet = StreamInlet(self.stream_info, max_buflen=self.max_buflen, processing_flags=pylsl.proc_ALL)
         return self
 
     def init_pbar(self):
@@ -54,7 +54,7 @@ class ProcessStream:
         return streams
 
     @classmethod
-    def from_resolve(cls, process_f, stream_type, preprocessor=None, chunksize=None, timeout=10, filter_f=None):
+    def from_resolve(cls, process_f, stream_type, preprocessor=None, max_buflen=None, timeout=10, filter_f=None):
         streams = cls.find_streams(stream_type=stream_type, timeout=timeout, filter_f=filter_f)
         s = None if len(streams) == 0 else streams[0]
         if len(streams) == 0:
@@ -63,7 +63,7 @@ class ProcessStream:
             print(f"{len(streams)} available, selecting the first")
 
         #print(f"-----Selected stream ----\n{print((s.as_xml()))}\n---------")
-        return cls(stream_info=s, process_f=process_f, preprocessor=preprocessor, chunksize=chunksize)
+        return cls(stream_info=s, process_f=process_f, preprocessor=preprocessor, max_buflen=max_buflen)
 
 
     def increment(self):
@@ -78,10 +78,14 @@ class ProcessStream:
 
     def increment_until(self, chunk_size):
         buffer = np.empty((chunk_size, self.stream_info.channel_count()), dtype=self.buffer.dtype)
+        # Pull as much data as we could use (full buffer)
         _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=buffer.shape[0], dest_obj=buffer)
+        # Until chunk_size is met, load data into buffer
         while len(timestamps) < chunk_size:
             remaining = chunk_size - len(timestamps)
-            _, new_timestamps = self.inlet.pull_chunk(timeout=0, max_samples=remaining, dest_obj=buffer[:remaining])
+            #b = buffer[buffer.shape[0] - remaining:]
+            b = buffer[len(timestamps):]
+            _, new_timestamps = self.inlet.pull_chunk(timeout=0, max_samples=remaining, dest_obj=b)
             timestamps += new_timestamps
 
         ts = pd.Series(map(pd.Timestamp.fromtimestamp, timestamps))
