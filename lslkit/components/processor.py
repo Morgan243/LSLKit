@@ -1,8 +1,12 @@
+import time
+
 import pylsl
 from pylsl import resolve_stream, resolve_bypred, resolve_byprop, StreamInlet
 import attr
 import numpy as np
 import pandas as pd
+
+from lslkit.components.outlets import PeriodicCallback
 
 @attr.s
 class ProcessStream:
@@ -16,6 +20,9 @@ class ProcessStream:
 
     done = attr.ib(False, init=False)
     _pbar = attr.ib(None, init=False)
+    buffer = attr.ib(None, init=False)
+    p_callback = attr.ib(None, init=False)
+    nominal_srate = attr.ib(None, init=False)
     #resolve_timeout = 10
     dtypes = [[], np.float32, np.float64, None, np.int32, np.int16, np.int8, np.int64]
 
@@ -28,9 +35,7 @@ class ProcessStream:
 
         self.stream_creation_t = self.stream_info.created_at()
         self.stream_creation_timesamp = pd.Timestamp.fromtimestamp(self.stream_creation_t)
-
-        if self.pbar:
-            self.init_pbar()
+        self.nominal_srate = self.stream_info.nominal_srate()
 
         self.init_lsl()
 
@@ -62,9 +67,7 @@ class ProcessStream:
         elif len(streams) > 1:
             print(f"{len(streams)} available, selecting the first")
 
-        #print(f"-----Selected stream ----\n{print((s.as_xml()))}\n---------")
         return cls(stream_info=s, process_f=process_f, preprocessor=preprocessor, max_buflen=max_buflen)
-
 
     def increment(self):
         _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=self.buffer.shape[0], dest_obj=self.buffer)
@@ -92,21 +95,45 @@ class ProcessStream:
         chunk_df = pd.DataFrame(buffer, index=ts - self.stream_creation_timesamp)
         return chunk_df
 
+    def sliding_increment(self, chunk_size):
+        buffer = np.empty((chunk_size, self.stream_info.channel_count()), dtype=self.buffer.dtype)
+        # Pull as much data as we could use (full buffer)
+        _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=buffer.shape[0], dest_obj=buffer)
+        # Put the first part at the end
+        self.buffer[len(timestamps):] = self.buffer[:self.buffer.shape[0] - len(timestamps)]
+
     def increment_and_process(self, required_size=None):
         chunk_df = self.increment() if required_size is None else self.increment_until(required_size)
         if chunk_df is not None:
             r = self.process_f(chunk_df)
-            self._pbar.update(n=chunk_df.shape[0])
         else:
             r = None
         return chunk_df, r
 
-    def begin(self, required_size=None):
+    def begin_async(self, required_size=None, count_samples=False):
+        print("WARNING: begin async not tested yet")
+        if self.pbar:
+            self.init_pbar()
+
+        def _proc():
+            in_data, proc_out = self.increment_and_process(required_size=required_size)
+            if self._pbar is not None and in_data is not None:
+                self._pbar.update(in_data.shape[0] if count_samples else 1)
+                self._pbar.set_description(f"{self.inlet.samples_available()} samples available")
+        self.p_callback = PeriodicCallback(
+            1. / self.nominal_srate, _proc
+        ).begin()
+
+    def begin(self, required_size=None, count_samples=False):
+        if self.pbar:
+            self.init_pbar()
+
         while not self.done:
             in_data, proc_out = self.increment_and_process(required_size=required_size)
-            if self._pbar is not None:
-                self._pbar.update(in_data.shape[0])
+            if self._pbar is not None and in_data is not None:
+                self._pbar.update(in_data.shape[0] if count_samples else 1)
                 self._pbar.set_description(f"{self.inlet.samples_available()} samples available")
+            time.sleep(1. / self.nominal_srate)
 
     def apply(self, other_as_in):
         def new_proc_func(_x):
