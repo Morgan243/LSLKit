@@ -23,6 +23,7 @@ class PeriodicCallback:
     _next_t = attr.ib(None, init=False)
     last_error = attr.ib(0, init=False)
     sum_error = attr.ib(0, init=False)
+    done_event = attr.ib(None, init=False)
 
 
     def _period(self):
@@ -47,6 +48,8 @@ class PeriodicCallback:
         r = self.callback(*self.args, **self.kwargs)
         if not self.done:
             threading.Timer(self._next_t - pylsl.local_clock() + self.add_error + error, self._period).start()
+        else:
+            self.done_event.set()
         return r
 
     def set_additional_error(self, error):
@@ -54,11 +57,14 @@ class PeriodicCallback:
         return self
 
     def begin(self):
+        self.done = False
+        self.done_event = threading.Event()
         self._period()
         return self
 
     def end(self):
         self.done = True
+        self.done_event.wait()
         return self
 
 
@@ -75,8 +81,8 @@ class BaseOutlet:
     buffer_time = attr.ib(0.)
     drop_error_rate = attr.ib(0.)
     channel_format = attr.ib('float32')
-    outlet_chunksize = attr.ib(512)
-    max_buffered = attr.ib(512)
+    outlet_chunksize = attr.ib(16)
+    max_buffered = attr.ib(256)
 
     p_callback = attr.ib(None, init=False)
     _pbar = attr.ib(None, init=False)
@@ -86,8 +92,6 @@ class BaseOutlet:
 
     def __attrs_post_init__(self):
         self.sample_delta_t = 1. / self.srate
-        if self.pbar:
-            self.init_pbar()
         self.init_lsl()
 
     def init_pbar(self):
@@ -111,6 +115,9 @@ class BaseOutlet:
         self.lsl_outlet.push_chunk(out, stamp)
 
     def begin(self):
+        if self.pbar:
+            self.init_pbar()
+
         assert self.p_callback is None, 'Callback handler already exists'
         self.p_callback = PeriodicCallback(self.sample_delta_t, self.push_to_lsl)
         self.p_callback.begin()
@@ -164,9 +171,8 @@ class FileReplayOutlet(BaseOutlet):
                 raise StopIteration()
             elif self.on_end == 'restart':
                 print("Restarting")
-                self.n_samples = 0
                 self.sent_samples = 0
-                self._pbar.close()
+                #self._pbar.close()
                 self.init_pbar()
 
         s = self.arr[self.sent_samples: self.sent_samples + n]
@@ -174,3 +180,101 @@ class FileReplayOutlet(BaseOutlet):
         self._pbar.update(n)
         return s
 
+
+from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
+import logging
+@attr.s
+class BrainflowOutlet(BaseOutlet):
+
+    serial_port = attr.ib('/dev/ttyACM0')
+    board_id = attr.ib(1)
+    timeout = attr.ib(0)
+    streamer_params = attr.ib('')
+    select_channels = attr.ib('all')
+    buffer_size = attr.ib(128 * 250)
+
+    lsl_outlet = attr.ib(None, init=False)
+
+#    options = [
+#        dict(dest='--serial-port', type=str, default=None, help='Serial port of device'),
+#        dict(dest='--board-id', type=int, default=None, hell='brainflow board id'),
+#        dict(dest='--timeout', type=int, default=0, help='Device discovery timeout')
+#    ]
+
+    def __attrs_post_init__(self):
+        self.board_shim = self.build_brainflow_shim(self.serial_port, self.board_id, self.timeout)
+
+        try:
+            self.board_shim.prepare_session()
+            self.board_shim.start_stream(self.buffer_size, self.streamer_params)
+            self.board_desc_map = self.board_shim.get_board_descr(self.board_id)
+            """
+            Example board_desc_map (Ganglion):
+            {'accel_channels': [5, 6, 7],
+             'analog_channels': None,
+             'ecg_channels': [1, 2, 3, 4],
+             'eeg_channels': [1, 2, 3, 4],
+             'emg_channels': [1, 2, 3, 4],
+             'eog_channels': [1, 2, 3, 4],
+             'marker_channel': 14,
+             'name': 'Ganglion',
+             'num_rows': 15,
+             'package_num_channel': 0,
+             'resistance_channels': [8, 9, 10, 11, 12],
+             'sampling_rate': 200,
+             'temperature_channels': None,
+             'timestamp_channel': 13}
+            """
+        except BaseException as e:
+            logging.warning('Exception', exc_info=True)
+            raise
+
+        types = [k.split('_')[0] for k, v in self.board_desc_map.items() if 'channel' in k and k != 'package_num_channel']
+        type_str = "_".join(types)
+
+        self.name = self.board_desc_map['name']
+        self.n_channels = self.board_desc_map['num_rows']
+        self.srate = self.board_desc_map['sampling_rate'] #/ 4
+        self.stream_type = type_str
+        print("Stream type: " + self.stream_type)
+        super().__attrs_post_init__()
+
+        #self.lsl_outlet = BaseOutlet(name=self.board_desc_map['name'], stream_type=type_str,
+        #                             # TODO: is numb rows correct for getting all channels (what's from board_data
+        #                             n_channels=self.board_desc_map['num_rows'])
+
+    @staticmethod
+    def build_brainflow_shim(serial_port: str, board_id: int, timeout=0, mac_address='', other_info='',
+                             serial_number=''):#, streamer_params='', buffer_size=188 * 250):
+        BoardShim.enable_dev_board_logger()
+
+        params = BrainFlowInputParams()
+        params.ip_port = 0
+        params.serial_port = serial_port
+        params.mac_address = mac_address
+        params.other_info = other_info
+        params.serial_number = serial_number
+        params.ip_address = ''
+        params.ip_protocol = 0
+        params.timeout = timeout
+        params.file = ''
+
+        board_shim = BoardShim(board_id, params)
+        return board_shim
+
+    def increment(self, n=None) -> list:
+        # Brainflow data is channel per row - transpose for lsl and dataframes
+        # Reshape to ensure always 2d
+        data = self.board_shim.get_board_data().T.reshape(-1, self.n_channels)
+        if self._pbar is not None:
+            self._pbar.update(data.shape[0])
+            #self._pbar.set_description()
+        #print("Data: " + str(data))
+        #print("-----")
+        return data
+
+    def end(self):
+        logging.info('End')
+        if self.board_shim and self.board_shim.is_prepared():
+            logging.info('Releasing session')
+            self.board_shim.release_session()
