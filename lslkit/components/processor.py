@@ -28,10 +28,14 @@ class ProcessStream:
 
     def __attrs_post_init__(self):
         import pylsl
+        self.dtype = self.dtypes[self.stream_info.channel_format()]
         #self.streams = resolve_byprop('type', 'EMG', timeout=10)
         #self.streams = self.find_streams(self.stream_type, self.resolve_timeout)
-        self.buffer = np.empty((self.max_buflen, self.stream_info.channel_count()),
-                               dtype=self.dtypes[self.stream_info.channel_format()])
+        if self.dtype is not None:
+            self.buffer = np.empty((self.max_buflen, self.stream_info.channel_count()),
+                                   dtype=self.dtype)
+        else:
+            self.buffer = None
 
         self.stream_creation_t = self.stream_info.created_at()
         self.stream_creation_timesamp = pd.Timestamp.fromtimestamp(self.stream_creation_t)
@@ -70,7 +74,11 @@ class ProcessStream:
         return cls(stream_info=s, process_f=process_f, preprocessor=preprocessor, max_buflen=max_buflen)
 
     def increment(self):
-        _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=self.buffer.shape[0], dest_obj=self.buffer)
+        if self.dtype is not None:
+            _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=self.buffer.shape[0], dest_obj=self.buffer)
+        else:
+            self.buffer, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=self.max_buflen)
+            self.buffer = np.array(self.buffer)
         #chunk_arr = np.array(chunk)
         if timestamps is not None and len(timestamps) > 0:
             ts = pd.Series(map(pd.Timestamp.fromtimestamp, timestamps))
@@ -80,9 +88,13 @@ class ProcessStream:
         return chunk_df
 
     def increment_until(self, chunk_size):
-        buffer = np.empty((chunk_size, self.stream_info.channel_count()), dtype=self.buffer.dtype)
-        # Pull as much data as we could use (full buffer)
-        _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=buffer.shape[0], dest_obj=buffer)
+        if self.dtype is not None:
+            buffer = np.empty((chunk_size, self.stream_info.channel_count()), dtype=self.buffer.dtype)
+            # Pull as much data as we could use (full buffer)
+            _, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=buffer.shape[0], dest_obj=buffer)
+        else:
+            buffer, timestamps = self.inlet.pull_chunk(timeout=0, max_samples=self.max_buflen)
+            buffer = np.array(buffer)
         # Until chunk_size is met, load data into buffer
         while len(timestamps) < chunk_size:
             remaining = chunk_size - len(timestamps)
@@ -128,12 +140,13 @@ class ProcessStream:
         if self.pbar:
             self.init_pbar()
 
+        sleep_t = 1. / self.nominal_srate if self.nominal_srate != 0 else 1./60
         while not self.done:
             in_data, proc_out = self.increment_and_process(required_size=required_size)
             if self._pbar is not None and in_data is not None:
                 self._pbar.update(in_data.shape[0] if count_samples else 1)
                 self._pbar.set_description(f"{self.inlet.samples_available()} samples available")
-            time.sleep(1. / self.nominal_srate)
+            time.sleep(sleep_t)
 
     def apply(self, other_as_in):
         def new_proc_func(_x):

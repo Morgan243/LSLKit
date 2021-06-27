@@ -180,9 +180,9 @@ class FileReplayOutlet(BaseOutlet):
         self._pbar.update(n)
         return s
 
-
 from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
 import logging
+
 @attr.s
 class BrainflowOutlet(BaseOutlet):
 
@@ -278,3 +278,103 @@ class BrainflowOutlet(BaseOutlet):
         if self.board_shim and self.board_shim.is_prepared():
             logging.info('Releasing session')
             self.board_shim.release_session()
+
+
+import sys
+@attr.s
+class KeyboardOutput(BaseOutlet):
+    event_handler = attr.ib(None)
+    srate = attr.ib(60)
+    stream_type = attr.ib("Markers")
+    channel_format = attr.ib("string")
+    n_channels = attr.ib(4) # event type, key unicode, mouse x, y position
+
+    window_width = attr.ib(600)
+    window_height = attr.ib(400)
+    window_bg_color = attr.ib((0, 0, 0))
+    window_surface = attr.ib(None)
+    lsl_outlet = attr.ib(None, init=False)
+
+    def __attrs_post_init__(self):
+        if self.window_surface is None:
+            self.window_surface = self.init_sdl(self.window_width, self.window_height,
+                                                self.window_bg_color)
+
+        super().__attrs_post_init__()
+        print("NAME: " + self.name)
+        print("TYPE: " + self.stream_type)
+
+#    pygame.init()
+#    BLACK = (0,0,0)
+#    WIDTH = 1280
+#    HEIGHT = 1024
+#    windowSurface = pygame.display.set_mode((WIDTH, HEIGHT), 0, 32)
+#
+#    windowSurface.fill(BLACK)
+#
+    def init_lsl(self):
+        self.outlet_info = pylsl.StreamInfo(self.name, self.stream_type, channel_count=self.n_channels,
+                                            nominal_srate=0, channel_format=self.channel_format,
+                                            source_id=self.name + self.stream_type + str(uuid4())[-5:])
+        self.lsl_outlet = pylsl.StreamOutlet(self.outlet_info, chunk_size=self.outlet_chunksize,
+                                             max_buffered=self.max_buffered)
+
+
+    @classmethod
+    def init_sdl(cls, width=1280, height=1024, color=(0, 0, 0)):
+
+        import pygame
+        pygame.init()
+        window_surface = pygame.display.set_mode((width, height), 0, 32)
+        window_surface.fill(color)
+        return window_surface
+
+    def increment(self, n=1) -> list:
+
+        import pygame
+        io_samples = list()
+        self.user_input = getattr(self, 'user_input', '')
+        for event in pygame.event.get():
+
+            if self.pbar:
+                self._pbar.update(n)
+                self._pbar.set_description(f"EVENT: {event.type}")
+
+            s = [str(event.type)]
+            if event.type == pygame.KEYDOWN:
+                s += [str(event.unicode)]
+
+                self.user_input += event.unicode
+            else:
+                s += ['']
+
+            x, y = pygame.mouse.get_pos()
+            io_samples.append(s + [str(x), str(y)])
+
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+
+            if self.event_handler is not None:
+                self.event_handler(event)
+
+        self.user_input = self.user_input[-30:]
+        font = pygame.font.Font(None, 40)
+        color = pygame.Color('dodgerblue1')
+        text = font.render(self.user_input, True, color)
+        lsl_t = font.render(str(pylsl.local_clock()), True, color)
+
+        x, y = pygame.mouse.get_pos()
+        pos_str = f"({x}, {y})"
+        pos_t = font.render(pos_str, True, color)
+
+        self.window_surface.fill((0, 0, 0))
+
+        self.window_surface.blit(text, (10, 40))
+        self.window_surface.blit(lsl_t, (10, 10))
+        self.window_surface.blit(pos_t, (x, y - 10))
+
+        pygame.display.flip()
+
+        return io_samples
+
