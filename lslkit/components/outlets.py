@@ -7,10 +7,15 @@ import os
 from scipy.io import loadmat
 from tqdm.auto import tqdm
 import threading
+import logging
 
 
 @attr.s
 class PeriodicCallback:
+    """
+    Asynchronously call a method with a fixed interval, with self-adjusting timing to
+    correct for error in time between samples.
+    """
     delta_t_sec = attr.ib()
     callback = attr.ib()
     args = attr.ib(attr.Factory(lambda: list()))
@@ -25,27 +30,32 @@ class PeriodicCallback:
     sum_error = attr.ib(0, init=False)
     done_event = attr.ib(None, init=False)
 
-
     def _period(self):
         t = pylsl.local_clock()
 
         if self._next_t is not None:
             this_error = self._next_t - t
             # This one works well - first iteration
-            error = (this_error) * 0.25 + (self.last_error * 0.25) + (self.sum_error * .75)
+            error = (this_error * 0.25) + (self.last_error * 0.25) + (self.sum_error * .75)
 
-            #error = (self._next_t - t) * 0. + (self.last_error * 0.25) + (self.sum_error * .75)
-            #error = (self._next_t - t) * 1.0 + (self.last_error * 0.) + (self.sum_error * .75)
-            #error = this_error * 1.0 + ((this_error - self.last_error) * .5) + (self.sum_error * .75)
-            #error = this_error * .25 + ((this_error - self.last_error) * .25) + (self.sum_error * .75)
+            # error = (self._next_t - t) * 0. + (self.last_error * 0.25) + (self.sum_error * .75)
+            # error = (self._next_t - t) * 1.0 + (self.last_error * 0.) + (self.sum_error * .75)
+            # error = this_error * 1.0 + ((this_error - self.last_error) * .5) + (self.sum_error * .75)
+            # error = this_error * .25 + ((this_error - self.last_error) * .25) + (self.sum_error * .75)
         else:
             error = 0
 
+        # Don't need last error anymore, so set it to this error for next cycle
         self.last_error = error
+        # Error history/memory/integral - weighted combination of accumulated error and this error
         self.sum_error = (self.sum_error / 2. + error / 2.)
+        # Target time is the time from start of processing this function plus delta time
         self._next_t = t + self.delta_t_sec
 
+        # CALLBACK
         r = self.callback(*self.args, **self.kwargs)
+
+        # RECURSE OR EXIT
         if not self.done:
             threading.Timer(self._next_t - pylsl.local_clock() + self.add_error + error, self._period).start()
         else:
@@ -70,6 +80,9 @@ class PeriodicCallback:
 
 @attr.s
 class BaseOutlet:
+    """
+    ABClass for `increment`: a method that yields n new samples to be pushed into LSL
+    """
     name = attr.ib(None)
     stream_type = attr.ib(None)
     n_channels = attr.ib(None)
@@ -89,7 +102,6 @@ class BaseOutlet:
     outlet_info = attr.ib(None, init=False)
     lsl_outlet = attr.ib(None, init=False)
 
-
     def __attrs_post_init__(self):
         self.sample_delta_t = 1. / self.srate
         self.init_lsl()
@@ -104,6 +116,7 @@ class BaseOutlet:
         self.lsl_outlet = pylsl.StreamOutlet(self.outlet_info, chunk_size=self.outlet_chunksize,
                                              max_buffered=self.max_buffered)
 
+    # Abstract method - override this
     def increment(self, n=1) -> list:
         raise NotImplementedError()
 
@@ -152,16 +165,16 @@ class FileReplayOutlet(BaseOutlet):
 
     @classmethod
     def load_file_to_frame(cls, p, key=None):
-        fname = os.path.split(p)[-1]
-        if '.csv' in fname.lower():
+        file_name = os.path.split(p)[-1]
+        if '.csv' in file_name.lower():
             df = pd.read_csv(p)
-        elif '.mat' in fname.lower():
+        elif '.mat' in file_name.lower():
             mat_data = loadmat(p, variable_names=[key])
             df = pd.DataFrame(mat_data[key])
-        elif '.hdf' in fname.lower():
+        elif '.hdf' in file_name.lower():
             df = pd.read_hdf(p, key)
         else:
-            raise ValueError("Don't know how to load " % fname)
+            raise ValueError("Don't know how to load '%s'" % file_name)
 
         return df
 
@@ -172,7 +185,7 @@ class FileReplayOutlet(BaseOutlet):
             elif self.on_end == 'restart':
                 print("Restarting")
                 self.sent_samples = 0
-                #self._pbar.close()
+                # self._pbar.close()
                 self.init_pbar()
 
         s = self.arr[self.sent_samples: self.sent_samples + n]
@@ -180,12 +193,11 @@ class FileReplayOutlet(BaseOutlet):
         self._pbar.update(n)
         return s
 
-from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
-import logging
+
+
 
 @attr.s
 class BrainflowOutlet(BaseOutlet):
-
     serial_port = attr.ib('/dev/ttyACM0')
     board_id = attr.ib(1)
     timeout = attr.ib(0)
@@ -195,11 +207,11 @@ class BrainflowOutlet(BaseOutlet):
 
     lsl_outlet = attr.ib(None, init=False)
 
-#    options = [
-#        dict(dest='--serial-port', type=str, default=None, help='Serial port of device'),
-#        dict(dest='--board-id', type=int, default=None, hell='brainflow board id'),
-#        dict(dest='--timeout', type=int, default=0, help='Device discovery timeout')
-#    ]
+    #    options = [
+    #        dict(dest='--serial-port', type=str, default=None, help='Serial port of device'),
+    #        dict(dest='--board-id', type=int, default=None, hell='brainflow board id'),
+    #        dict(dest='--timeout', type=int, default=0, help='Device discovery timeout')
+    #    ]
 
     def __attrs_post_init__(self):
         self.board_shim = self.build_brainflow_shim(self.serial_port, self.board_id, self.timeout)
@@ -229,23 +241,26 @@ class BrainflowOutlet(BaseOutlet):
             logging.warning('Exception', exc_info=True)
             raise
 
-        types = [k.split('_')[0] for k, v in self.board_desc_map.items() if 'channel' in k and k != 'package_num_channel']
+        types = [k.split('_')[0] for k, v in self.board_desc_map.items() if
+                 'channel' in k and k != 'package_num_channel']
         type_str = "_".join(types)
 
         self.name = self.board_desc_map['name']
         self.n_channels = self.board_desc_map['num_rows']
-        self.srate = self.board_desc_map['sampling_rate'] #/ 4
+        self.srate = self.board_desc_map['sampling_rate']  # / 4
         self.stream_type = type_str
         print("Stream type: " + self.stream_type)
         super().__attrs_post_init__()
 
-        #self.lsl_outlet = BaseOutlet(name=self.board_desc_map['name'], stream_type=type_str,
+        # self.lsl_outlet = BaseOutlet(name=self.board_desc_map['name'], stream_type=type_str,
         #                             # TODO: is numb rows correct for getting all channels (what's from board_data
         #                             n_channels=self.board_desc_map['num_rows'])
 
     @staticmethod
     def build_brainflow_shim(serial_port: str, board_id: int, timeout=0, mac_address='', other_info='',
-                             serial_number=''):#, streamer_params='', buffer_size=188 * 250):
+                             serial_number=''):  # , streamer_params='', buffer_size=188 * 250):
+
+        from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds
         BoardShim.enable_dev_board_logger()
 
         params = BrainFlowInputParams()
@@ -268,9 +283,9 @@ class BrainflowOutlet(BaseOutlet):
         data = self.board_shim.get_board_data().T.reshape(-1, self.n_channels)
         if self._pbar is not None:
             self._pbar.update(data.shape[0])
-            #self._pbar.set_description()
-        #print("Data: " + str(data))
-        #print("-----")
+            # self._pbar.set_description()
+        # print("Data: " + str(data))
+        # print("-----")
         return data
 
     def end(self):
@@ -281,13 +296,15 @@ class BrainflowOutlet(BaseOutlet):
 
 
 import sys
+
+
 @attr.s
 class KeyboardOutput(BaseOutlet):
     event_handler = attr.ib(None)
     srate = attr.ib(60)
     stream_type = attr.ib("Markers")
     channel_format = attr.ib("string")
-    n_channels = attr.ib(4) # event type, key unicode, mouse x, y position
+    n_channels = attr.ib(4)  # event type, key unicode, mouse x, y position
 
     window_width = attr.ib(600)
     window_height = attr.ib(400)
@@ -304,21 +321,20 @@ class KeyboardOutput(BaseOutlet):
         print("NAME: " + self.name)
         print("TYPE: " + self.stream_type)
 
-#    pygame.init()
-#    BLACK = (0,0,0)
-#    WIDTH = 1280
-#    HEIGHT = 1024
-#    windowSurface = pygame.display.set_mode((WIDTH, HEIGHT), 0, 32)
-#
-#    windowSurface.fill(BLACK)
-#
+    #    pygame.init()
+    #    BLACK = (0,0,0)
+    #    WIDTH = 1280
+    #    HEIGHT = 1024
+    #    windowSurface = pygame.display.set_mode((WIDTH, HEIGHT), 0, 32)
+    #
+    #    windowSurface.fill(BLACK)
+    #
     def init_lsl(self):
         self.outlet_info = pylsl.StreamInfo(self.name, self.stream_type, channel_count=self.n_channels,
                                             nominal_srate=0, channel_format=self.channel_format,
                                             source_id=self.name + self.stream_type + str(uuid4())[-5:])
         self.lsl_outlet = pylsl.StreamOutlet(self.outlet_info, chunk_size=self.outlet_chunksize,
                                              max_buffered=self.max_buffered)
-
 
     @classmethod
     def init_sdl(cls, width=1280, height=1024, color=(0, 0, 0)):
@@ -377,4 +393,3 @@ class KeyboardOutput(BaseOutlet):
         pygame.display.flip()
 
         return io_samples
-

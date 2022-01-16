@@ -5,4 +5,4 @@ setup(name='lslkit',
       author='Morgan Stuart',
       packages=find_packages(),
       requires=['pylsl', 'numpy', 'pandas',
-                'attrs'])
+                'attrs', 'tqdm', 'scipy'])
