@@ -8,6 +8,7 @@ from scipy.io import loadmat
 from tqdm.auto import tqdm
 import threading
 import logging
+import pathlib
 
 
 @attr.s
@@ -164,17 +165,21 @@ class FileReplayOutlet(BaseOutlet):
         super().__attrs_post_init__()
 
     @classmethod
-    def load_file_to_frame(cls, p, key=None):
-        file_name = os.path.split(p)[-1]
-        if '.csv' in file_name.lower():
+    def load_file_to_frame(cls, p, key=None, file_type=None):
+        pt = pathlib.Path(p)
+        assert pt.is_file(), f"Expected path to file, but got: {p}"
+
+        file_type = pt.stem if file_type is None else file_type
+
+        if file_type == '.csv':
             df = pd.read_csv(p)
-        elif '.mat' in file_name.lower():
+        elif file_type == '.mat':
             mat_data = loadmat(p, variable_names=[key])
             df = pd.DataFrame(mat_data[key])
-        elif '.hdf' in file_name.lower():
+        elif file_type == '.hdf':
             df = pd.read_hdf(p, key)
         else:
-            raise ValueError("Don't know how to load '%s'" % file_name)
+            raise ValueError("Don't know how to load '%s'" % pt.stem)
 
         return df
 
@@ -299,7 +304,9 @@ import sys
 
 
 @attr.s
-class KeyboardOutput(BaseOutlet):
+class SDLEventOutput(BaseOutlet):
+    """Use SDL graphics framework to capture typical PC inputs (i.e. keyboard and mouse events), but could
+    be extended or used with other controllers supported by SDL."""
     event_handler = attr.ib(None)
     srate = attr.ib(60)
     stream_type = attr.ib("Markers")

@@ -1,4 +1,4 @@
-from lslkit.components.outlets import KeyboardOutput
+from lslkit.components.outlets import SDLEventOutput
 import time
 
 if __name__ == """__main__""":
@@ -19,7 +19,7 @@ if __name__ == """__main__""":
     import socket
     hostname = socket.gethostname()
     #bfo = BrainflowOutlet(options.serial_port, options.board_id, options.timeout)
-    ko = KeyboardOutput('pc_inputs_on_' + hostname, window_width=options.width,
+    ko = SDLEventOutput('pc_inputs_on_' + hostname, window_width=options.width,
                         window_height=options.height)
 
     #f_out = outlets.FileReplayOutlet(file_path=options.file_path, stream_type=options.stream_type,
